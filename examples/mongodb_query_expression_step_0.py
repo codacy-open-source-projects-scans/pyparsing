@@ -51,6 +51,7 @@ import re
 from typing import Union, Dict
 
 import pyparsing as pp
+
 pp.ParserElement.enable_packrat()
 
 ppc = pp.common
@@ -72,8 +73,7 @@ integer = ppc.integer()
 array_ref = LBRACK + integer + RBRACK
 array_ref.add_parse_action(lambda t: f".{t[0]}")
 ident = pp.Combine(
-    ppc.identifier
-    + ("." + (ppc.identifier() | integer) | array_ref)[...]
+    ppc.identifier + ("." + (ppc.identifier() | integer) | array_ref)[...]
 )
 num = ppc.number()
 
@@ -84,23 +84,25 @@ date_time.add_parse_action(lambda t: datetime.fromisoformat(t[0].replace("/", "-
 
 operand = (
     ident
-    | (pp.QuotedString('"')
-    | pp.QuotedString("'")).set_name("quoted_string")
+    | (pp.QuotedString('"') | pp.QuotedString("'")).set_name("quoted_string")
     | date_time
     | date
     | num
 )
 operand.set_name("operand")
-operand_list = pp.Group(LBRACK + pp.Optional(pp.DelimitedList(operand)) + RBRACK, aslist=True)
+operand_list = pp.Group(
+    LBRACK + pp.Optional(pp.DelimitedList(operand)) + RBRACK, aslist=True
+)
 
-AND, OR, NOT, IN, CONTAINS, ALL, ANY, NONE, LIKE = pp.CaselessKeyword.using_each(
-    "and or not in contains all any none like".split()
+AND, OR, NOT, IN, CONTAINS, ALL, ANY, NONE, LIKE, SEARCH, FOR = pp.CaselessKeyword.using_each(
+    "and or not in contains all any none like search for".split()
 )
 NOT_IN = key_phrase(NOT + IN)
 NOT_LIKE = key_phrase(NOT + LIKE)
 CONTAINS_ALL = key_phrase(CONTAINS + ALL)
 CONTAINS_NONE = key_phrase(CONTAINS + NONE)
 CONTAINS_ANY = key_phrase(CONTAINS + ANY)
+SEARCH_FOR = key_phrase(SEARCH + FOR)
 
 
 # use pyparsing's infix_notation function to define a recursive grammar
@@ -110,9 +112,9 @@ CONTAINS_ANY = key_phrase(CONTAINS + ANY)
 arith_comparison_expr = pp.infix_notation(
     (operand | operand_list).set_name("arith_comparison_operand"),
     [
-        (pp.one_of("<= >= < > ≤ ≥"), 2, pp.OpAssoc.LEFT, ),
-        (pp.one_of("= == != ≠"), 2, pp.OpAssoc.LEFT, ),
-        (LIKE | NOT_LIKE | "=~", 2, pp.OpAssoc.LEFT, ),
+        (pp.one_of("<= >= < > ≤ ≥"), 2, pp.OpAssoc.LEFT,),
+        (pp.one_of("= == != ≠"), 2, pp.OpAssoc.LEFT,),
+        ( LIKE | NOT_LIKE | "=~", 2, pp.OpAssoc.LEFT,),
         (
             (
                 IN
@@ -126,7 +128,7 @@ arith_comparison_expr = pp.infix_notation(
             2,
             pp.OpAssoc.LEFT,
         ),
-    ]
+    ],
 )
 
 # "not" operator only matches if not followed by "in" or "like"
@@ -134,23 +136,26 @@ NOT_OP = NOT + ~(IN | LIKE)
 AND_OP = AND | pp.Literal("∧").add_parse_action(pp.replace_with("and"))
 OR_OP = OR | pp.Literal("∨").add_parse_action(pp.replace_with("or"))
 
+
 boolean_comparison_expr = pp.infix_notation(
     (arith_comparison_expr | ident).set_name("boolean_comparison_operand"),
     [
-        (NOT_OP, 1, pp.OpAssoc.RIGHT, ),
-        (AND_OP, 2, pp.OpAssoc.LEFT, ),
-        (OR_OP, 2, pp.OpAssoc.LEFT, ),
-    ]
+        (NOT_OP, 1, pp.OpAssoc.RIGHT,),
+        (AND_OP, 2, pp.OpAssoc.LEFT,),
+        (OR_OP, 2, pp.OpAssoc.LEFT,),
+    ],
 )
-
 query_condition_expr = boolean_comparison_expr
 
 pp.autoname_elements()
 
 
 def main():
+    from pprint import pprint
     from textwrap import dedent
-    for test in dedent("""\
+
+    for test in dedent(
+        """\
         a = 100
         a = 100 and b = 200
         a = 100 and b < 200 and c > 300 and d = 400
@@ -225,10 +230,10 @@ def main():
         except Exception as exc:
             print(pp.ParseException.explain_exception(exc))
         else:
-            print(transformed)
+            pprint(transformed.as_list()[0])
         print()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     query_condition_expr.create_diagram("mongodb_query_expression_0.html")
     main()

@@ -19,6 +19,7 @@ import re
 from typing import Union, Dict
 
 import pyparsing as pp
+
 pp.ParserElement.enable_packrat()
 
 ppc = pp.common
@@ -50,8 +51,7 @@ integer = ppc.integer()
 array_ref = LBRACK + integer + RBRACK
 array_ref.add_parse_action(lambda t: f".{t[0]}")
 ident = pp.Combine(
-    ppc.identifier
-    + ("." + (ppc.identifier() | integer) | array_ref)[...]
+    ppc.identifier + ("." + (ppc.identifier() | integer) | array_ref)[...]
 )
 num = ppc.number()
 
@@ -68,16 +68,21 @@ operand = (
     | num
 )
 operand.set_name("operand")
-operand_list = pp.Group(LBRACK + pp.Optional(pp.DelimitedList(operand)) + RBRACK, aslist=True)
+operand_list = pp.Group(
+    LBRACK + pp.Optional(pp.DelimitedList(operand)) + RBRACK, aslist=True
+)
 
-AND, OR, NOT, IN, CONTAINS, ALL, ANY, NONE, LIKE = pp.CaselessKeyword.using_each(
-    "and or not in contains all any none like".split()
+AND, OR, NOT, IN, CONTAINS, ALL, ANY, NONE, LIKE, SEARCH, FOR = (
+    pp.CaselessKeyword.using_each(
+        "and or not in contains all any none like search for".split()
+    )
 )
 NOT_IN = key_phrase(NOT + IN)
 NOT_LIKE = key_phrase(NOT + LIKE)
 CONTAINS_ALL = key_phrase(CONTAINS + ALL)
 CONTAINS_NONE = key_phrase(CONTAINS + NONE)
 CONTAINS_ANY = key_phrase(CONTAINS + ANY)
+SEARCH_FOR = key_phrase(SEARCH + FOR)
 
 
 def binary_eq_neq(s, l, tokens):
@@ -94,7 +99,7 @@ def binary_eq_neq(s, l, tokens):
 
     if op in ("=", "=="):
         return {a: b}
-    return { a: { "$ne": b } }
+    return {a: {"$ne": b}}
 
 
 def binary_comparison_op(s, l, tokens):
@@ -148,14 +153,11 @@ def binary_comparison_op(s, l, tokens):
                 )
             op1 = inequality_inv_map[op1]
             op2 = binary_map[op2]
-            return binary_multi_op(
-                [
-                    [{field: {op1: a}}, "and", {field: {op2: b}}]
-                ]
-            )
+            return binary_multi_op([[{field: {op1: a}}, "and", {field: {op2: b}}]])
         raise InvalidExpressionException(
-            s, l,
-            f"{tokens[1]!r} comparison operator may not be chained with more than 2 terms"
+            s,
+            l,
+            f"{tokens[1]!r} comparison operator may not be chained with more than 2 terms",
         )
 
     return {field: {binary_map[op]: value}}
@@ -169,7 +171,7 @@ def binary_array_comparison_op(s, l, tokens):
     binary_map = {
         "in": "$in",
         "not in": "$nin",
-        "contains": "$in",
+        "contains any": "$in",
         "contains all": "$all",
         # add Unicode operators, because we can
         "⊇": "$all",
@@ -181,36 +183,41 @@ def binary_array_comparison_op(s, l, tokens):
         field, op, value = tokens
     except ValueError:
         raise InvalidExpressionException(
-            s, l,
-            f"{tokens[1]!r} operator may not be chained with more than 2 terms"
+            s, l, f"{tokens[1]!r} operator may not be chained with more than 2 terms"
         )
 
     # check for inverted "in" conditions
     if op == "in" and not isinstance(value, list):
         field, value = value, field
-        if isinstance(value, list):
-            op = "contains all"
-        else:
-            op = "contains"
+        field, op, value = (
+            field,
+            "contains any",
+            value if isinstance(value, list) else [value],
+        )
 
     elif op == "not in" and not isinstance(value, list):
         field, value = value, field
-        field, op, value = field, "contains none", value if isinstance(value, list) else [value]
+        field, op, value = (
+            field,
+            "contains none",
+            value if isinstance(value, list) else [value],
+        )
 
     if op == "contains none":
         return {
-            field: { "$nin": list(unique(value)) if isinstance(value, list) else {value}}
+            field: {"$nin": list(unique(value)) if isinstance(value, list) else {value}}
         }
 
     if op == "contains any":
         return {
-            field: { "$in": list(unique(value)) if isinstance(value, list) else {value}}
+            field: {"$in": list(unique(value)) if isinstance(value, list) else {value}}
         }
 
-    if op == "contains":
-        return {field: {binary_map[op]: value if isinstance(value, list) else [value]}}
-
-    return {field: {binary_map[op]: list(unique(value)) if isinstance(value, list) else {value}}}
+    return {
+        field: {
+            binary_map[op]: list(unique(value)) if isinstance(value, list) else {value}
+        }
+    }
 
 
 def regex_comparison_op(s, l, tokens):
@@ -221,16 +228,30 @@ def regex_comparison_op(s, l, tokens):
     try:
         field, op, value = tokens
     except ValueError:
-        raise InvalidExpressionException(s, l, f"{tokens[1]!r} operations may not be chained")
+        raise InvalidExpressionException(
+            s, l, f"{tokens[1]!r} operations may not be chained"
+        )
+
+    # early return for query wildcards that accept or reject any value
+    if (op, value) in (
+        ("=~", ""),
+        ("=~", ".*"),
+        ("like", ""),
+        ("like", "%"),
+    ):
+        return {field: {"$exists": True}}
+
+    if (op, value) in (
+        ("not like", ""),
+        ("not like", "%"),
+    ):
+        return {field: {"$exists": False}}
 
     # =~ means value is already a regex
     if op == "=~":
-        return {field: {"$regex": value} if value not in ("", ".*") else {"$exists": True}}
+        return {field: {"$regex": value}}
 
     # op is LIKE or NOT LIKE; value is a "%" wildcard string, convert it to a regex
-
-    if value in ("", "%"):
-        return {field: {"$exists": True}}
 
     # convert "%" wild cards to ".*" and add anchors
     value = re.escape(value)
@@ -239,15 +260,12 @@ def regex_comparison_op(s, l, tokens):
         (False, True): lambda ss: f"^{ss[:-1]}",
         (True, False): lambda ss: f"{ss[1:]}$",
         (True, True): lambda ss: ss[1:-1],
-    }[value[:1] == "%", value[-1:] == "%"]
+    }[value.startswith("%"), value.endswith("%")]
 
     # convert "%" to ".*" and "%%" to "%"
     DBL_PCT = "\x80"
     re_string = (
-        xform(value)
-        .replace('%%', DBL_PCT)
-        .replace('%', '.*')
-        .replace(DBL_PCT, '%')
+        xform(value).replace("%%", DBL_PCT).replace("%", ".*").replace(DBL_PCT, "%")
     )
 
     if op == "like":
@@ -310,13 +328,16 @@ def binary_multi_op(tokens):
 
 def unary_op(tokens):
     """
-    Parse action to handle 'not' Boolean operator.
+    Parse action to handle 'not' Boolean operator or 'search for' operator.
     """
     tokens = tokens[0]
     oper_map = {
         "not": "$nor",
     }
     op, value = tokens
+
+    if op == "search for":
+        return {"$text": {"$search": value}}
 
     # detect 'not not'
     k, v = next(iter(value.items()))
@@ -333,24 +354,24 @@ def unary_op(tokens):
 arith_comparison_expr = pp.infix_notation(
     (operand | operand_list).set_name("arith_comparison_operand"),
     [
+        (SEARCH_FOR, 1, pp.OpAssoc.RIGHT, unary_op),
         (pp.one_of("<= >= < > ≤ ≥"), 2, pp.OpAssoc.LEFT, binary_comparison_op),
         (pp.one_of("= == != ≠"), 2, pp.OpAssoc.LEFT, binary_eq_neq),
         (LIKE | NOT_LIKE | "=~", 2, pp.OpAssoc.LEFT, regex_comparison_op),
         (
             (
-                IN
-                | NOT_IN
-                | CONTAINS_ALL
-                | CONTAINS_NONE
-                | CONTAINS_ANY
-                | CONTAINS
-                | pp.one_of("⊇ ∈ ∉")
+                    IN
+                    | NOT_IN
+                    | CONTAINS_ALL
+                    | CONTAINS_NONE
+                    | CONTAINS_ANY
+                    | pp.one_of("⊇ ∈ ∉")
             ),
             2,
             pp.OpAssoc.LEFT,
-            binary_array_comparison_op
+            binary_array_comparison_op,
         ),
-    ]
+    ],
 )
 
 # "not" operator only matches if not followed by "in" or "like"
@@ -364,7 +385,7 @@ boolean_comparison_expr = pp.infix_notation(
         (NOT_OP, 1, pp.OpAssoc.RIGHT, unary_op),
         (AND_OP, 2, pp.OpAssoc.LEFT, binary_multi_op),
         (OR_OP, 2, pp.OpAssoc.LEFT, binary_multi_op),
-    ]
+    ],
 )
 
 query_condition_expr = boolean_comparison_expr
@@ -387,14 +408,19 @@ def transform_query(query_string: str, include_comment: bool = False) -> Dict:
     generated query.
 
     Arithmetic comparison operators are (in order of precedence):
+        search for
         <= >= < > ≤ ≥
         = == != ≠
         =~, like, not like
         ⊇ ∈ ∉, in, not in, contains, contains all, contains none, contains any
 
-    Boolean operators are (in order of precedence) 'not', 'and', and 'or'. '∧' and '∨'
-    can be used interchangeably with 'and' and 'or'. Boolean operators are all of lower
-    precedence than arithmetic comparison operators.
+    Boolean operators are (in order of precedence):
+        not
+        and
+        or
+
+    '∧' and '∨' can be used interchangeably with 'and' and 'or'. Boolean operators are
+    all of lower precedence than arithmetic comparison operators.
 
     '=' and '==' are equivalent, to accommodate variations in user expression dialects.
 
@@ -410,7 +436,7 @@ def transform_query(query_string: str, include_comment: bool = False) -> Dict:
 
     Array indexing can be done using 'field.0' form or 'field[0]' form.
 
-    Embedded documents are accessed using '.' notation, as in 'field.subfield'.
+    Embedded documents are accessed using '.' notation, as in 'field.embedded_doc_field'.
 
     All operator keywords are case-insensitive (i.e., 'LIKE' and 'like' are equivalent).
 
@@ -468,10 +494,7 @@ def transform_query(query_string: str, include_comment: bool = False) -> Dict:
         "Bob" not in names
         {'names': {'$nin': ['Bob']}}
 
-    - `contains [any | all | None]`
-        names contains "Alice"
-        {'names': {'$in': ['Alice']}}
-
+    - `contains [any | all | none]`
         names contains any ["Alice", "Bob"]
         {'names': {'$in': ['Alice', 'Bob']}}
 
@@ -506,13 +529,29 @@ def transform_query(query_string: str, include_comment: bool = False) -> Dict:
         a =~ "ABC\d+"
         {'a': {'$regex': '^ABC\\d+'}}
 
+    - SEARCH FOR keywords using text search indexes
+        search for "birds"
+        {'$text': {'$search': 'birds'}}
+
     - Unicode operators
         100 < a ≤ 200 and 300 > b ≥ 200 or c ≠ -1
-        100 < a ≤ 200 ∧ 300 > b ≥ 200 ∨ c ≠ -1
-        name ∈ ["Alice", "Bob"]
-        name ∉ ["Alice", "Bob"]
-        names ⊇ ["Alice", "Bob"]
+        {'$or': [{'$and': [{'$and': [{'a': {'$gt': 100}}, {'a': {'$lte': 200}}]},
+                           {'$and': [{'b': {'$lt': 300}}, {'b': {'$gte': 200}}]}]},
+                 {'c': {'$ne': -1}}]}
 
+        100 < a ≤ 200 ∧ 300 > b ≥ 200 ∨ c ≠ -1
+        {'$or': [{'$and': [{'$and': [{'a': {'$gt': 100}}, {'a': {'$lte': 200}}]},
+                           {'$and': [{'b': {'$lt': 300}}, {'b': {'$gte': 200}}]}]},
+                 {'c': {'$ne': -1}}]}
+
+        name ∈ ["Alice", "Bob"]
+        {'name': {'$in': ['Alice', 'Bob']}}
+
+        name ∉ ["Alice", "Bob"]
+        {'name': {'$nin': ['Alice', 'Bob']}}
+
+        names ⊇ ["Alice", "Bob"]
+        {'names': {'$all': ['Alice', 'Bob']}}
     """
     transformer_expr = (
         query_condition_expr_with_comment
@@ -523,8 +562,10 @@ def transform_query(query_string: str, include_comment: bool = False) -> Dict:
 
 
 def main():
-    from textwrap import dedent
-    for test in dedent("""\
+    from pprint import pprint
+
+    for test in (
+        """\
         a = 100
         a = 100 and b = 200
         a = 100 and b < 200 and c > 300 and d = 400
@@ -539,7 +580,10 @@ def main():
         xyz == 2000 or abc == '32' or def == "foo"
         100 < a < 200
         a==100 and not (100 < b <= 200)
+
+        # fields with embedded spaces
         1900 < "wine vintage" < 2000
+
         name > "M"
         100 < a ≤ 200 or 300 > b ≥ 200 or c ≠ -1
         100 < a ≤ 200 ∧ 300 > b ≥ 200 ∧ c ≠ -1
@@ -553,11 +597,10 @@ def main():
         name ∈ ["Alice", "Bob"]
         name not in ["Alice", "Bob"]
         name ∉ ["Alice", "Bob"]
+        names contains any ["Alice", "Bob"]
         names contains all ["Alice", "Bob"]
         names ⊇ ["Alice", "Bob"]
         names contains none ["Alice", "Bob"]
-        names contains any ["Alice", "Bob"]
-        names contains "Alice"
         "Alice" in names
         "Bob" not in names
         a.b > 1000
@@ -588,21 +631,31 @@ def main():
         a = 100 and a = 100
         # cannot define conflicting equality conditions
         a = 100 and a = 200
+        search for "world"
+        search for "hello" and a > 100
         """
         r"name =~ 'Al\d+'"
     ).splitlines():
+        test = test.strip()
+        if not test:
+            continue
+
         print(test)
+
         if test.startswith("#"):
             continue
+
         try:
             transformed = transform_query(test)
+        except pp.ParseBaseException as exc:
+            print(exc.explain(depth=0))
         except Exception as exc:
             print(pp.ParseException.explain_exception(exc))
         else:
-            print(transformed)
+            pprint(transformed, indent=2, sort_dicts=False)
         print()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     query_condition_expr.create_diagram("mongodb_query_expression.html")
     main()
