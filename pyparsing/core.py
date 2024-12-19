@@ -215,12 +215,7 @@ _single_arg_builtins = {
 _generatorType = types.GeneratorType
 ParseImplReturnType = tuple[int, Any]
 PostParseReturnType = Union[ParseResults, Sequence[ParseResults]]
-ParseAction = Union[
-    Callable[[], Any],
-    Callable[[ParseResults], Any],
-    Callable[[int, ParseResults], Any],
-    Callable[[str, int, ParseResults], Any],
-]
+
 ParseCondition = Union[
     Callable[[], bool],
     Callable[[ParseResults], bool],
@@ -486,6 +481,7 @@ class ParserElement(ABC):
         self.callPreparse = True
         self.callDuringTry = False
         self.suppress_warnings_: list[Diagnostics] = []
+        self.show_in_diagram = True
 
     def suppress_warning(self, warning_type: Diagnostics) -> ParserElement:
         """
