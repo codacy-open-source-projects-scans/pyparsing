@@ -19,22 +19,23 @@ from pyparsing import (
     LineEnd,
     Optional,
     White,
-    originalTextFor,
+    original_text_for,
     hexnums,
     nums,
     Combine,
     Literal,
     Keyword,
-    cStyleComment,
+    c_style_comment,
     Regex,
     Forward,
     MatchFirst,
     And,
-    oneOf,
+    one_of,
     alphas,
     alphanums,
-    delimitedList,
+    DelimitedList,
     Char,
+    autoname_elements,
 )
 
 # http://www.antlr.org/grammar/ANTLR/ANTLRv3.g
@@ -75,23 +76,25 @@ keywords = (
     PROTECTED,
     PUBLIC,
     PRIVATE,
-) = map(
-    Keyword,
+) = list(
+    Keyword.using_each(
     """src scope options tokens fragment id lexer parser grammar tree catch finally throws protected
        public private """.split(),
+    )
 )
+
 KEYWORD = MatchFirst(keywords)
 
 # Tokens
 EOL = Suppress(LineEnd())  # $
 SGL_PRINTABLE = Char(printables)
-singleTextString = originalTextFor(
+singleTextString = original_text_for(
     ZeroOrMore(~EOL + (White(" \t") | Word(printables)))
-).leaveWhitespace()
+).leave_whitespace()
 XDIGIT = hexnums
 INT = Word(nums)
 ESC = BSLASH + (
-    oneOf(list(r"nrtbf\">" + "'")) | ("u" + Word(hexnums, exact=4)) | SGL_PRINTABLE
+    one_of(list(r"nrtbf\">" + "'")) | ("u" + Word(hexnums, exact=4)) | SGL_PRINTABLE
 )
 LITERAL_CHAR = ESC | ~(APOS | BSLASH) + SGL_PRINTABLE
 CHAR_LITERAL = APOS + LITERAL_CHAR + APOS
@@ -116,7 +119,7 @@ SL_COMMENT = (
     Suppress("//") + Suppress("$ANTLR") + SRC
     | ZeroOrMore(~EOL + Word(printables)) + EOL
 )
-ML_COMMENT = cStyleComment
+ML_COMMENT = c_style_comment
 WS = OneOrMore(
     Suppress(" ") | Suppress("\t") | (Optional(Suppress("\r")) + Literal("\n"))
 )
@@ -151,7 +154,7 @@ REWRITE = Suppress("->")
 # General Parser Definitions
 
 # Grammar heading
-optionValue = id | STRING_LITERAL | CHAR_LITERAL | INT | Literal("*").setName("s")
+optionValue = id | STRING_LITERAL | CHAR_LITERAL | INT | Literal("*").set_name("s")
 
 option = Group(id("id") + EQ + optionValue("value"))("option")
 optionsSpec = OPTIONS + Group(OneOrMore(option + SEMI))("options") + RBRACE
@@ -181,13 +184,13 @@ grammarHeading = (
 
 modifier = PROTECTED | PUBLIC | PRIVATE | FRAGMENT
 ruleAction = AT + id + ACTION
-throwsSpec = THROWS.suppress() + delimitedList(id)
+throwsSpec = THROWS.suppress() + DelimitedList(id)
 ruleScopeSpec = (
     (SCOPE_.suppress() + ACTION)
-    | (SCOPE_.suppress() + delimitedList(id) + SEMI)
-    | (SCOPE_.suppress() + ACTION + SCOPE_.suppress() + delimitedList(id) + SEMI)
+    | (SCOPE_.suppress() + DelimitedList(id) + SEMI)
+    | (SCOPE_.suppress() + ACTION + SCOPE_.suppress() + DelimitedList(id) + SEMI)
 )
-unary_op = oneOf("^ !")
+unary_op = one_of("^ !")
 notTerminal = CHAR_LITERAL | TOKEN_REF | STRING_LITERAL
 terminal = (
     CHAR_LITERAL | TOKEN_REF + Optional(ARG_ACTION) | STRING_LITERAL | "."
@@ -203,11 +206,11 @@ atom = Group(
 )
 element = Forward()
 treeSpec = ROOT + LPAR + element * (2,) + RPAR
-ebnfSuffix = oneOf("? * +")
+ebnfSuffix = one_of("? * +")
 ebnf = block + Optional(ebnfSuffix("op") | "=>")
 elementNoOptionSpec = (
-    (id("result_name") + oneOf("= +=")("labelOp") + atom("atom") + Optional(ebnfSuffix))
-    | (id("result_name") + oneOf("= +=")("labelOp") + block + Optional(ebnfSuffix))
+    (id("result_name") + one_of("= +=")("labelOp") + atom("atom") + Optional(ebnfSuffix))
+    | (id("result_name") + one_of("= +=")("labelOp") + block + Optional(ebnfSuffix))
     | atom("atom") + Optional(ebnfSuffix)
     | ebnf
     | ACTION
@@ -252,6 +255,7 @@ rule = Group(ruleHeading + COLON + altList + SEMI + Optional(exceptionGroup))("r
 
 grammarDef = grammarHeading + Group(OneOrMore(rule))("rules")
 
+autoname_elements()
 
 def grammar():
     return grammarDef
@@ -341,6 +345,10 @@ def antlrConverter(antlrGrammarTree):
 
 
 if __name__ == "__main__":
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        grammarDef.create_diagram("antlr_grammar_diagram.html", vertical=2, show_groups=True)
 
     text = """\
 grammar SimpleCalc;
@@ -379,10 +387,9 @@ fragment DIGIT    : '0'..'9' ;
 
 """
 
-    grammar().validate()
-    antlrGrammarTree = grammar().parseString(text)
+    antlrGrammarTree = grammar().parse_string(text)
     print(antlrGrammarTree.dump())
     pyparsingRules = antlrConverter(antlrGrammarTree)
     pyparsingRule = pyparsingRules["expr"]
-    pyparsingTree = pyparsingRule.parseString("2 - 5 * 42 + 7 / 25")
+    pyparsingTree = pyparsingRule.parse_string("2 - 5 * 42 + 7 / 25")
     print(pyparsingTree.dump())

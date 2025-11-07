@@ -5,9 +5,10 @@
 # Updated 2023 - using PEP8 API names
 #
 
-import pyparsing as pp
+import contextlib
 import random
 import string
+import pyparsing as pp
 
 
 def a_or_an(item):
@@ -453,9 +454,9 @@ class Parser:
         quitVerb = pp.one_of("QUIT Q", caseless=True)
         lookVerb = pp.one_of("LOOK L", caseless=True)
         doorsVerb = pp.CaselessLiteral("DOORS")
-        helpVerb = pp.one_of("H HELP ?", caseless=True)
+        helpVerb = pp.one_of("H HELP ?", caseless=True).set_name("HELP | H | ?")
 
-        itemRef = pp.OneOrMore(pp.Word(pp.alphas)).set_parse_action(self.validate_item_name).setName("item_ref")
+        itemRef = pp.OneOrMore(pp.Word(pp.alphas)).set_parse_action(self.validate_item_name).set_name("item_ref")
         nDir = pp.one_of("N NORTH", caseless=True).set_parse_action(pp.replace_with("N"))
         sDir = pp.one_of("S SOUTH", caseless=True).set_parse_action(pp.replace_with("S"))
         eDir = pp.one_of("E EAST", caseless=True).set_parse_action(pp.replace_with("E"))
@@ -477,7 +478,7 @@ class Parser:
         quitCommand = quitVerb
         lookCommand = lookVerb
         examineCommand = pp.one_of("EXAMINE EX X", caseless=True) + itemRef("item")
-        doorsCommand = doorsVerb.setName("DOORS")
+        doorsCommand = doorsVerb.set_name("DOORS")
         helpCommand = helpVerb
 
         # attach command classes to expressions
@@ -508,7 +509,15 @@ class Parser:
             | doorsCommand
             | helpCommand
             | quitCommand
-        )("command")
+        )("command").set_name("command")
+
+        with contextlib.suppress(Exception):
+            parser.create_diagram(
+                "adventure_game_parser_diagram.html",
+                vertical=3,
+                show_groups=True,
+                show_results_names=True
+            )
 
         return parser
 

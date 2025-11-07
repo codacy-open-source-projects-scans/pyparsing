@@ -19,8 +19,6 @@ Using the pyparsing module
     expressions, processing custom application language commands, or
     extracting data from formatted reports.
 
-.. sectnum::    :depth: 4
-
 .. contents::   :depth: 4
 
 Note: While this content is still valid, there are more detailed
@@ -998,7 +996,7 @@ Exception classes and Troubleshooting
 
       expr = pp.Word(pp.alphanums).set_name("word").set_debug()
       print(ppt.with_line_numbers(data))
-      expr[...].parseString(data)
+      expr[...].parse_string(data)
 
   prints::
 
@@ -1155,7 +1153,7 @@ Helper methods
 
         expr = infix_notation(int_expr,
             [
-                (one_of("+ -"), 2, opAssoc.LEFT),
+                (one_of("+ -"), 2, OpAssoc.LEFT),
             ],
             lpar="<",
             rpar=">"
@@ -1170,7 +1168,7 @@ Helper methods
 
         expr = infix_notation(int_expr,
             [
-                (one_of("+ -"), 2, opAssoc.LEFT),
+                (one_of("+ -"), 2, OpAssoc.LEFT),
             ],
             lpar=Literal("<"),
             rpar=Literal(">")
@@ -1488,6 +1486,8 @@ This will result in the railroad diagram being written to ``street_address_diagr
 - ``show_results_names`` - bool flag whether diagram should show annotations for defined results names
 
 - ``show_groups`` - bool flag whether groups should be highlighted with an unlabeled surrounding box
+
+- ``show_hidden`` - bool flag whether internal pyparsing elements that are normally omitted in diagrams should be shown (default=False)
 
 - ``embed`` - bool flag whether generated HTML should omit <HEAD>, <BODY>, and <DOCTYPE> tags to embed
   the resulting HTML in an enclosing HTML source (such as PyScript HTML)

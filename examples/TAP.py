@@ -34,16 +34,17 @@ from pyparsing import (
     Group,
     OneOrMore,
     Suppress,
-    restOfLine,
+    rest_of_line,
     FollowedBy,
     empty,
+    autoname_elements,
 )
 
 __all__ = ["tapOutputParser", "TAPTest", "TAPSummary"]
 
 # newlines are significant whitespace, so set default skippable
 # whitespace to just spaces and tabs
-ParserElement.setDefaultWhitespaceChars(" \t")
+ParserElement.set_default_whitespace_chars(" \t")
 NL = LineEnd().suppress()
 
 integer = Word(nums)
@@ -52,19 +53,19 @@ plan = "1.." + integer("ubound")
 OK, NOT_OK = map(Literal, ["ok", "not ok"])
 testStatus = OK | NOT_OK
 
-description = Regex("[^#\n]+")
-description.setParseAction(lambda t: t[0].lstrip("- "))
+description = Regex(r"[^#\n]+")
+description.set_parse_action(lambda t: t[0].lstrip("- "))
 
 TODO, SKIP = map(CaselessLiteral, "TODO SKIP".split())
 directive = Group(
     Suppress("#")
     + (
-        TODO + restOfLine
-        | FollowedBy(SKIP) + restOfLine.copy().setParseAction(lambda t: ["SKIP", t[0]])
+        TODO + rest_of_line
+        | FollowedBy(SKIP) + rest_of_line.copy().set_parse_action(lambda t: ["SKIP", t[0]])
     )
 )
 
-commentLine = Suppress("#") + empty + restOfLine
+commentLine = Suppress("#") + empty + rest_of_line
 
 testLine = Group(
     Optional(OneOrMore(commentLine + NL))("comments")
@@ -73,11 +74,13 @@ testLine = Group(
     + Optional(description)("description")
     + Optional(directive)("directive")
 )
-bailLine = Group(Literal("Bail out!")("BAIL") + empty + Optional(restOfLine)("reason"))
+bailLine = Group(Literal("Bail out!")("BAIL") + empty + Optional(rest_of_line)("reason"))
 
 tapOutputParser = Optional(Group(plan)("plan") + NL) & Group(
     OneOrMore((testLine | bailLine) + NL)
 )("tests")
+
+autoname_elements()
 
 
 class TAPTest:
@@ -91,7 +94,7 @@ class TAPTest:
 
     @classmethod
     def bailedTest(cls, num):
-        ret = TAPTest(empty.parseString(""))
+        ret = TAPTest(empty.parse_string(""))
         ret.num = num
         ret.skipped = True
         return ret
@@ -166,10 +169,15 @@ class TAPSummary:
 
 # create TAPSummary objects from tapOutput parsed results, by setting
 # class as parse action
-tapOutputParser.setParseAction(TAPSummary)
+tapOutputParser.set_parse_action(TAPSummary)
 
 
 def main():
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        tapOutputParser.create_diagram("TAP_diagram.html", vertical=3)
+
     test1 = """\
         1..4
         ok 1 - Input file opened
@@ -238,7 +246,7 @@ def main():
 
     for test in (test1, test2, test3, test4, test5, test6):
         print(test)
-        tapResult = tapOutputParser.parseString(test)[0]
+        tapResult = tapOutputParser.parse_string(test)[0]
         print(tapResult.summary(showAll=True))
         print()
 

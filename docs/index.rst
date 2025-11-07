@@ -7,15 +7,18 @@ Welcome to PyParsing's documentation!
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Release v\ |version|
 
+.. rubric:: Contents
+
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
 
    HowToUsePyparsing
    whats_new_in_3_2
    whats_new_in_3_1
    whats_new_in_3_0_0
-   modules
+   pyparsing
+   CONTRIBUTING
+   Writing_Doctests
    CODE_OF_CONDUCT
 
 

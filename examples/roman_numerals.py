@@ -56,9 +56,6 @@ roman_numeral = (
 ).set_parse_action(sum)
 pp.autoname_elements()
 
-# uncomment to generate railroad diagram
-# roman_numeral.create_diagram("romanNumerals.html")
-
 
 # unit tests
 def make_roman_numeral(n):
@@ -86,6 +83,12 @@ def make_roman_numeral(n):
 
 
 def main():
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        # generate railroad diagram
+        roman_numeral.create_diagram("roman_numerals_diagram.html")
+
     # make a string of all roman numerals from I to MMMMM
     tests = " ".join(make_roman_numeral(i) for i in range(1, 5000 + 1))
 
@@ -103,7 +106,7 @@ def main():
                 f"incorrect value for {s} ({tokens[0]}), expected {expected_value}"
             )
 
-    success1, _ = roman_numeral.runTests(
+    success1, _ = roman_numeral.run_tests(
         """\
         XVI
         XXXIX
@@ -120,7 +123,7 @@ def main():
     assert success1, "failed to parse one or more legal Roman numerals"
 
     print("\nRun failure tests")
-    success2, _ = roman_numeral.runTests(
+    success2, _ = roman_numeral.run_tests(
         """\
         # too many X's
         XXXX

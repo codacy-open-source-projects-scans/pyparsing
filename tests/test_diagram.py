@@ -88,8 +88,8 @@ class TestRailroadDiagrams(unittest.TestCase):
     def test_example_rr_diags(self):
         subtests = [
             ("jsonObject", jsonObject, 8),
-            ("boolExpr", boolExpr, 7),
-            ("simpleSQL", simpleSQL, 22),
+            ("boolExpr", boolExpr, 6),
+            ("simpleSQL", simpleSQL, 20),
             ("calendars", calendars, 13),
         ]
         for label, example_expr, expected_rr_len in subtests:
@@ -115,8 +115,8 @@ class TestRailroadDiagrams(unittest.TestCase):
                 ), f"expected {expected_rr_len}, got {len(railroad)}"
 
     def test_nested_forward_with_inner_and_outer_names(self):
-        outer = pp.Forward().setName("outer")
-        inner = pp.Word(pp.alphas)[...].setName("inner")
+        outer = pp.Forward().set_name("outer")
+        inner = pp.Word(pp.alphas)[...].set_name("inner")
         outer <<= inner
 
         railroad = self.generate_railroad(outer, "inner_outer_names")
@@ -128,13 +128,13 @@ class TestRailroadDiagrams(unittest.TestCase):
 
     def test_nested_forward_with_inner_name_only(self):
         outer = pp.Forward()
-        inner = pp.Word(pp.alphas)[...].setName("inner")
+        inner = pp.Word(pp.alphas)[...].set_name("inner")
         outer <<= inner
 
         railroad = self.generate_railroad(outer, "inner_only")
-        assert len(railroad) == 2
+        assert len(railroad) == 1
         railroad = self.generate_railroad(outer, "inner_only", show_results_names=True)
-        assert len(railroad) == 2
+        assert len(railroad) == 1
 
     def test_each_grammar(self):
 
@@ -144,7 +144,7 @@ class TestRailroadDiagrams(unittest.TestCase):
                 pp.Word(pp.alphas),
                 pp.pyparsing_common.uuid,
             ]
-        ).setName("int-word-uuid in any order")
+        ).set_name("int-word-uuid in any order")
         railroad = self.generate_railroad(grammar, "each_expression")
         assert len(railroad) == 2
         railroad = self.generate_railroad(
@@ -159,7 +159,7 @@ class TestRailroadDiagrams(unittest.TestCase):
         assert railroad[0].name is not None
 
     def test_none_name2(self):
-        grammar = pp.Or(["foo", "bar"]) + pp.Word(pp.nums).setName("integer")
+        grammar = pp.Or(["foo", "bar"]) + pp.Word(pp.nums).set_name("integer")
         railroad = to_railroad(grammar)
         assert len(railroad) == 2
         assert railroad[0].name is not None
