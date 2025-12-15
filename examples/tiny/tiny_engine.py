@@ -8,10 +8,14 @@ It also defines `TinyFrame`, which represents a single stack frame for local
 variables. `TinyEngine` maintains a stack (list) of frames, with the current
 frame being the last element.
 """
+
 from __future__ import annotations
 
 import pyparsing as pp
 from .tiny_ast import TinyNode
+
+# Module version for TINY runtime/engine
+__version__ = "0.1"
 
 import operator
 
@@ -30,6 +34,7 @@ _op_map = {
     "||": operator.or_,
 }
 
+
 class TinyFrame:
     """A single stack frame holding local variables and their types.
 
@@ -46,12 +51,12 @@ class TinyFrame:
 
     def declare(self, name: str, dtype: str, value: object) -> None:
         if name in self._vars:
-            raise NameError(f"Variable already declared in frame: {name}")
+            raise NameError(f"Variable already declared in frame: {name!r}")
         self._vars[name] = [dtype, value]
 
     def set(self, name: str, value: object) -> None:
         if name not in self._vars:
-            raise NameError(f"Variable not declared in this frame: {name}")
+            raise NameError(f"Variable not declared: {name!r}")
         self._vars[name][1] = value
 
     def get(self, name: str) -> object:
@@ -92,25 +97,27 @@ class TinyEngine:
 
     # ----- Program-level registry (globals/functions) -----
     def register_function(self, name: str, fn: TinyNode) -> None:
-        """Register a program-level function definition by name.
-        """
+        """Register a program-level function definition by name."""
         self._functions[name] = fn
+        self._function_sigs[name] = (fn.return_type, fn.parameters)
+
 
     def get_function(self, name: str) -> TinyNode | None:
         return self._functions.get(name)
 
-    def register_function_signature(self, name: str, return_type: str, params: list[tuple[str, str]]) -> None:
-        """Register or update a function's signature metadata.
+    def get_functions(self) -> dict[str, TinyNode]:
+        return {**self._functions}
 
-        params: list of (ptype, pname)
-        """
-        self._function_sigs[name] = (return_type, params)
+    def get_function_signatures(self) -> dict[str, tuple[str, list[tuple[str, str]]]]:
+        return {**self._function_sigs}
 
     # ----- Frame management -----
     @property
     def current_frame(self) -> TinyFrame:
         if not self._frames:
-            raise RuntimeError("No current frame: push_frame() must be called before using locals")
+            raise RuntimeError(
+                "No current frame: push_frame() must be called before using locals"
+            )
         return self._frames[-1]
 
     def push_frame(self) -> None:
@@ -144,26 +151,38 @@ class TinyEngine:
         self._out.append("\n")
 
     # ----- Variables API -----
-    def declare_var(self, name: str, dtype: str, init_value: object | None = None) -> None:
+    def declare_var(
+        self, name: str, dtype: str, init_value: object | None = None
+    ) -> None:
         """Declare a variable with an optional initial value.
 
         dtype: 'int' | 'float' | 'string'
         """
         # Declare in the current frame only
         if dtype not in {"int", "float", "string"}:
-            raise TypeError(f"Unsupported datatype: {dtype}")
+            raise TypeError(f"Unsupported datatype: {dtype!r}")
         if name in self.current_frame:
-            raise NameError(f"Variable already declared: {name}")
-        value = self._coerce(init_value, dtype) if init_value is not None else self._default_for(dtype)
+            raise NameError(f"Variable already declared: {name!r}")
+        value = (
+            self._coerce(init_value, dtype)
+            if init_value is not None
+            else self._default_for(dtype)
+        )
         self.current_frame.declare(name, dtype, value)
 
     # Globals API
-    def declare_global_var(self, name: str, dtype: str, init_value: object | None = None) -> None:
+    def declare_global_var(
+        self, name: str, dtype: str, init_value: object | None = None
+    ) -> None:
         if dtype not in {"int", "float", "string"}:
-            raise TypeError(f"Unsupported datatype: {dtype}")
+            raise TypeError(f"Unsupported datatype: {dtype!r}")
         if name in self._globals:
-            raise NameError(f"Global already declared: {name}")
-        value = self._coerce(init_value, dtype) if init_value is not None else self._default_for(dtype)
+            raise NameError(f"Global already declared: {name!r}")
+        value = (
+            self._coerce(init_value, dtype)
+            if init_value is not None
+            else self._default_for(dtype)
+        )
         self._globals.declare(name, dtype, value)
 
     def assign_global_var(self, name: str, value: object) -> None:
@@ -177,7 +196,11 @@ class TinyEngine:
 
     def assign_var(self, name: str, value: object) -> None:
         """Assign to an existing variable; if undeclared, declare using inferred type."""
-        if isinstance(value, (list, tuple)) or hasattr(value, "__class__") and value.__class__.__name__ == "ParseResults":
+        if (
+            isinstance(value, (list, tuple))
+            or hasattr(value, "__class__")
+            and value.__class__.__name__ == "ParseResults"
+        ):
             # Late evaluation if a parse tree is passed accidentally
             value = self.eval_expr(value)  # type: ignore[arg-type]
 
@@ -201,7 +224,7 @@ class TinyEngine:
             return frame.get(name)
         if name in self._globals:
             return self._globals.get(name)
-        raise NameError(f"Variable not declared: {name}")
+        raise NameError(f"Variable not declared: {name!r}")
 
     # ----- Expression Evaluation -----
     def eval_expr(self, expr: object) -> object:
@@ -227,7 +250,9 @@ class TinyEngine:
             # Function call group
             if "type" in expr and expr["type"] == "func_call":  # type: ignore[index]
                 name = expr.name
-                arg_values = [self.eval_expr(arg) for arg in (expr.get("args", []) or [])]
+                arg_values = [
+                    self.eval_expr(arg) for arg in (expr.get("args", []) or [])
+                ]
                 return self.call_function(name, arg_values)
 
             # Infix notation yields list-like tokens
@@ -270,13 +295,15 @@ class TinyEngine:
         """
         fn = self.get_function(name)
         if fn is None:
-            raise NameError(f"Undefined function: {name}")
+            raise NameError(f"Undefined function: {name!r}")
 
         if name not in self._function_sigs:
             raise TypeError(f"Missing signature for function {name!r}")
         return_type, params = self._function_sigs[name]
         if len(args) != len(params):
-            raise TypeError(f"Function {name} expects {len(params)} args, got {len(args)}")
+            raise TypeError(
+                f"Function {name!r} expects {len(params)} args, got {len(args)}"
+            )
 
         self.push_frame()
         try:
@@ -320,7 +347,7 @@ class TinyEngine:
 
         if dtype == "string":
             return str(value)
-        raise TypeError(f"Unsupported datatype: {dtype}")
+        raise TypeError(f"Unsupported datatype: {dtype!r}")
 
     def _to_number(self, v: object) -> int | float:
         """Return a numeric value for v following Tiny semantics.
@@ -341,7 +368,9 @@ class TinyEngine:
             try:
                 val = self.get_var(v)
             except NameError as exc:
-                raise TypeError(f"Expected numeric variable name, got undefined identifier {v!r}") from exc
+                raise TypeError(
+                    f"Expected numeric variable name, got undefined identifier {v!r}"
+                ) from exc
             if isinstance(val, (int, float)):
                 return val
             raise TypeError(f"Variable {v!r} is not numeric: {val!r}")
@@ -377,6 +406,11 @@ class TinyEngine:
             # Numeric operations
             lnum = self._to_number(lhs)
             rnum = self._to_number(rhs)
-            return _op_map[op](lnum, rnum)
+            ret = _op_map[op](lnum, rnum)
+
+            # leave ints as ints
+            if op != "/" and isinstance(lnum, int) and isinstance(rnum, int):
+                ret = self._coerce(ret, "int")
+            return ret
 
         raise NotImplementedError(f"Operator not implemented: {op!r}")

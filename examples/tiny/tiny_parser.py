@@ -1,8 +1,8 @@
 """
 TINY language parser (expanded grammar with types, functions, and control flow)
 
-This module defines a pyparsing grammar for an expanded instructional subset of the
-TINY language, including declarations, functions, and boolean conditions.
+This module defines a pyparsing grammar for the instructional TINY language,
+including declarations, functions, and boolean conditions.
 
 Usage
 - Programmatic:
@@ -20,7 +20,11 @@ are structured using names and Groups to support later processing.
 Grammar definitions are based on the Tiny Language Reference:
 https://github.com/a7medayman6/Tiny-Compiler/blob/master/Language-Description.md
 """
+
 from __future__ import annotations
+
+# disable black reformatting
+# fmt: off
 
 import pyparsing as pp
 
@@ -63,27 +67,36 @@ FunctionName = Identifier
 # Literals
 # Use ppc.number to auto-convert to Python int/float during parsing
 number = ppc.number.set_name("Number")
-string_lit = pp.QuotedString('"', esc_char="\\", unquote_results=True).set_name("String")
+string_lit = pp.QuotedString('"', esc_char="\\", unquote_results=True).set_name(
+    "String"
+)
 
 # Forward declarations
 expr = pp.Forward().set_name("expr")
 term = pp.Forward().set_name("term")
 statement = pp.Forward().set_name("statement")
 stmt_seq = pp.Forward().set_name("stmt_seq")
-bool_expr = pp.Forward().set_name("condition_stmt")
+bool_expr = pp.Forward().set_name("bool_expr")
 
 # Function call: name '(' [Identifier (',' Identifier)*] ')'
 function_call = pp.Group(
     pp.Tag("type", "func_call")
     + FunctionName("name")
     + LPAREN
-    + pp.Optional(pp.DelimitedList(expr, COMMA))("args")
-    + RPAREN
+    + (
+        # fast evaluation of empty arg list, since it is common, and the recursive expr
+        # parser can be expensive
+        RPAREN
+        | pp.DelimitedList(expr)("args") + RPAREN
+    )
 ).set_name("function_call")
 
 # Term: number | Identifier | func_call | '(' expr ')'
 term <<= (
-        number | string_lit | function_call | Identifier #| pp.Group(LPAREN + expr + RPAREN)
+    number
+    | string_lit
+    | function_call
+    | Identifier  # | pp.Group(LPAREN + expr + RPAREN)
 ).set_name("term")
 
 # Operators
@@ -124,11 +137,11 @@ expr <<= bool_expr
 
 
 # Datatypes
-Datatype = pp.MatchFirst([INT, FLOAT, STRING]).set_name("Datatype")
+Datatype = (INT | FLOAT | STRING).set_name("Datatype")
 
 # Declarations: Datatype id (:= expr)? (',' id (:= expr)?)*
-init_opt = pp.Optional(ASSIGN + expr("init"))
-var_decl = pp.Group(Identifier("name") + init_opt)
+var_init = (ASSIGN + expr("init")).set_name("var_initialization")
+var_decl = pp.Group(Identifier("name") + pp.Optional(var_init)).set_name("var_decl")
 Declaration_Statement = pp.Group(
     pp.Tag("type", "decl_stmt")
     + Datatype("datatype")
@@ -147,44 +160,45 @@ Assignment_Statement = pp.Group(
 
 # Read/Write
 Read_Statement = pp.Group(
-    pp.Tag("type", "read_stmt") + READ.suppress() - Identifier("var") + SEMI
+    pp.Tag("type", "read_stmt") + READ - Identifier("var") + SEMI
 ).set_name("Read_Statement")
 Write_Statement = pp.Group(
     pp.Tag("type", "write_stmt")
-    + WRITE.suppress()
+    + WRITE
     - (ENDL.copy().set_parse_action(lambda: "endl") | expr("expr"))
     + SEMI
 ).set_name("Write_Statement")
 
 # Return
 Return_Statement = pp.Group(
-    pp.Tag("type", "return_stmt") + RETURN.suppress() - expr("expr") + SEMI
+    pp.Tag("type", "return_stmt") + RETURN - expr("expr") - SEMI
 ).set_name("Return_Statement")
 
 # If / ElseIf / Else
 If_Statement = pp.Group(
     pp.Tag("type", "if_stmt")
-    + IF.suppress()
+    + IF
     + bool_expr("cond")
-    + THEN.suppress()
+    + THEN
     - pp.Group(stmt_seq)("then")
     + pp.ZeroOrMore(
         pp.Group(
-            ELSEIF.suppress()
+            ELSEIF
             - bool_expr("cond")
-            + THEN.suppress()
-            + pp.Group(stmt_seq)("then"))
+            + THEN
+            + pp.Group(stmt_seq)("then")
+        )
     )("elseif")
-    + pp.Optional(ELSE.suppress() - pp.Group(stmt_seq)("else"))
-    + END.suppress()
+    + pp.Optional(ELSE - pp.Group(stmt_seq)("else"))
+    + END
 ).set_name("If_Statement")
 
 # Repeat Until
 Repeat_Statement = pp.Group(
     pp.Tag("type", "repeat_stmt")
-    + REPEAT.suppress()
+    + REPEAT
     - pp.Group(stmt_seq)("body")
-    + UNTIL.suppress()
+    + UNTIL
     + bool_expr("cond")
 ).set_name("Repeat_Statement")
 
@@ -197,17 +211,15 @@ Function_Call_Statement = (
     ).set_name("Function_Call_Statement")
 )
 
-statement <<= pp.MatchFirst(
-    [
-        Declaration_Statement,
-        Assignment_Statement,
-        If_Statement,
-        Repeat_Statement,
-        Read_Statement,
-        Write_Statement,
-        Return_Statement,
-        Function_Call_Statement,
-    ]
+statement <<= (
+    Declaration_Statement
+    | Assignment_Statement
+    | If_Statement
+    | Repeat_Statement
+    | Read_Statement
+    | Write_Statement
+    | Return_Statement
+    | Function_Call_Statement
 )
 
 stmt_seq <<= pp.OneOrMore(statement)
@@ -218,11 +230,13 @@ Param_List = pp.Group(pp.DelimitedList(Parameter, COMMA))
 Function_Declaration = pp.Group(
     Datatype("return_type")
     + FunctionName("name")
-    + LPAREN - pp.Optional(Param_List, default=[])("parameters") + RPAREN
+    + LPAREN
+    - pp.Optional(Param_List, default=[])("parameters")
+    + RPAREN
 ).set_name("Function_Declaration")
-Function_Body = pp.Group(
-    LBRACE + pp.Group(stmt_seq)("stmts") + RBRACE
-).set_name("Function_Body")
+Function_Body = pp.Group(LBRACE + pp.Group(stmt_seq)("stmts") + RBRACE).set_name(
+    "Function_Body"
+)
 Function_Definition = pp.Group(
     pp.Tag("type", "func_decl")
     + Function_Declaration("decl")
@@ -230,20 +244,21 @@ Function_Definition = pp.Group(
 ).set_name("Function_Definition")
 
 Main_Function = pp.Group(
-    pp.Tag("type", "main_decl") +
-    Datatype("return_type") + MAIN.suppress() + LPAREN + RPAREN - Function_Body("body")
-)
+    pp.Tag("type", "main_decl")
+    + Datatype("return_type")
+    + MAIN
+    + LPAREN
+    + RPAREN
+    - Function_Body("body")
+).set_name("Main_Function")
 
 # Program: {Function_Statement} Main_Function
 Program = pp.Group(
     pp.Group(pp.ZeroOrMore(Function_Definition))("functions") + Main_Function("main")
-)("program").set_name("program")
+)("program").set_name("Program")
 
-# Ignore comments globally
+# Ignore comments
 Program.ignore(comment)
-
-# Optional: generate diagram
-# Program.create_diagram('tiny_parser_diagram.html', show_results_names=True)
 
 
 def parse_tiny(text: str) -> pp.ParseResults:
@@ -281,11 +296,15 @@ def _mini_tests() -> None:
 
     program_tests = [
         # Function with params and return, and main
-        'int sum(int a, int b){ write a; return a + b; } int main(){ int r; r := sum(2,3); write r; return 0; }',
+        "int sum(int a, int b){ write a; return a + b; } int main(){ int r; r := sum(2,3); write r; return 0; }",
         'int main(){ write "Hello, World!"; return 0; }',
     ]
     Program.run_tests(program_tests, parse_all=True, full_dump=True)
 
 
 if __name__ == "__main__":
+
+    # Optional: generate diagram
+    # Program.create_diagram("tiny_parser_diagram.html", show_results_names=True)
+
     _mini_tests()

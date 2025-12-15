@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, ClassVar
+from typing import Optional, ClassVar, Any
 import pyparsing as pp
 
 
@@ -82,6 +82,19 @@ class TinyNode(ABC):
         """Construct an instance from a parser `ParseResults` group."""
         raise NotImplementedError
 
+    @staticmethod
+    def body_statements(stmts: list[Any] | Any) -> list[TinyNode]:
+        """Convert a sequence of parsed body statements to TinyNode instances.
+
+        Used in statements with a contained body (e.g. function, repeat, if-then-else).
+        """
+        built: list[TinyNode] = []
+        for stmt in stmts:
+            node_cls = TinyNode.from_statement_type(stmt["type"])  # type: ignore[index]
+            if node_cls is not None:
+                built.append(node_cls.from_parsed(stmt))  # type: ignore[arg-type]
+        return built
+
     # Execution interface (must be overridden by subclasses)
     def execute(self, engine: "TinyEngine") -> object | None:  # noqa: F821 - forward ref
         """Execute this node against the given engine.
@@ -107,12 +120,15 @@ class MainDeclNode(TinyNode):
     statement_type: ClassVar[str] = "main_decl"
 
     # Prebuilt main-body statements
+    return_type: str = "int"
+    parameters: list[tuple[str, str]] = field(default_factory=list)
     statements: list[TinyNode] = field(default_factory=list)
 
     def __init__(self, parsed: pp.ParseResults):
         super().__init__(parsed)
         # Pre-build contained statement nodes for the main body
         self.statements = []
+        self.parameters = []
         self.build_contained_statements()
 
     @classmethod
@@ -127,14 +143,7 @@ class MainDeclNode(TinyNode):
         """
         body = self.parsed.body
         stmts = body.stmts if hasattr(body, "stmts") else []
-        built: list[TinyNode] = []
-        for stmt in stmts:
-            if isinstance(stmt, pp.ParseResults) and "type" in stmt:
-                node_cls = TinyNode.from_statement_type(stmt["type"])  # type: ignore[index]
-                if node_cls is not None:
-                    # All subclasses are guaranteed to implement from_parsed
-                    built.append(node_cls.from_parsed(stmt))  # type: ignore[arg-type]
-        self.statements = built
+        self.statements = self.body_statements(stmts)
 
     def execute(self, engine: "TinyEngine") -> int:  # noqa: F821 - forward ref
         # Main body: push a new frame for main's locals
@@ -164,26 +173,31 @@ class FunctionDeclStmtNode(TinyNode):
 
     # Prebuilt function body statements (if a body was provided)
     name: str
+    return_type: str = ""
+    parameters: list[tuple[str, str]] = field(default_factory=list)
     statements: list[TinyNode] = field(default_factory=list)
 
     @classmethod
     def from_parsed(cls, parsed: pp.ParseResults) -> FunctionDeclStmtNode:
         fn_name = parsed.decl.name
+        return_type = parsed.decl.return_type
+        if parsed.decl.parameters:
+            params = [(p.type, p.name) for p in parsed.decl.parameters[0]]
+        else:
+            params = []
 
         # Locate a function body group in common shapes
         body_group: pp.ParseResults = parsed.body
 
-        built: list[TinyNode] = []
+        statement_nodes: list[TinyNode] = []
         if body_group:
             raw_stmts = body_group.stmts or []
-            for stmt in raw_stmts:
-                node_cls = TinyNode.from_statement_type(stmt["type"])  # type: ignore[index]
-                if node_cls is not None:
-                    built.append(node_cls.from_parsed(stmt))  # type: ignore[arg-type]
-        return cls(name=fn_name, statements=built)
+            statement_nodes.extend(cls.body_statements(raw_stmts))
+
+        return cls(name=fn_name, return_type=return_type, parameters=params, statements=statement_nodes)
 
     def execute(self, engine: "TinyEngine") -> object | None:  # noqa: F821 - forward ref
-        # Execute the function body in a new local frame. If no body is present,
+        # Execute the function body in a new local frame. If body is absent,
         # this is effectively a no-op that returns None.
 
         # Caller should have already created a frame and populated parameters as vars
@@ -212,15 +226,13 @@ class DeclStmtNode(TinyNode):
 
     dtype: str = "int"
     # list of (name, init_expr | None)
-    decls: List[Tuple[str, Optional[object]]] = field(default_factory=list)
+    decls: list[tuple[str, Optional[object]]] = field(default_factory=list)
 
     @classmethod
     def from_parsed(cls, parsed: pp.ParseResults) -> DeclStmtNode:
         dtype = parsed.datatype or "int"
-        items: List[Tuple[str, Optional[object]]] = []
+        items: list[tuple[str, Optional[object]]] = []
         for d in (parsed.decls or []):
-            if not isinstance(d, pp.ParseResults):
-                continue
             name = d.get("name")
             init_expr = d.init if "init" in d else None  # type: ignore[attr-defined]
             items.append((name, init_expr))
@@ -266,68 +278,37 @@ class IfStmtNode(TinyNode):
     """
     statement_type: ClassVar[str] = "if_stmt"
 
-    # Explicit fields for condition and branches
-    cond: object | None = None
-    then_statements: list[TinyNode] = field(default_factory=list)
-    elseif_branches: list[tuple[object, list[TinyNode]]] = field(default_factory=list)
-    else_statements: list[TinyNode] = field(default_factory=list)
+    # Explicit fields for all conditions and corresponding branches
+    branches: list[tuple[object, list[TinyNode]]] = field(default_factory=list)
 
     @classmethod
     def from_parsed(cls, parsed: pp.ParseResults) -> IfStmtNode:
-        # Initial condition (defined by the parser for if-statements)
-        cond_expr = parsed.cond if "cond" in parsed else None
 
-        # Build THEN branch nodes
-        built_then: list[TinyNode] = []
-        then_seq = parsed.then if "then" in parsed else []
-        for stmt in then_seq:
-            if isinstance(stmt, pp.ParseResults) and "type" in stmt:
-                node_cls = TinyNode.from_statement_type(stmt["type"])  # type: ignore[index]
-                if node_cls is not None:
-                    built_then.append(node_cls.from_parsed(stmt))  # type: ignore[arg-type]
+        branches: list[tuple[object, list[TinyNode]]] = []
 
-        # Build ELSEIF branches
-        built_elseif: list[tuple[object, list[TinyNode]]] = []
-        if "elseif" in parsed:
-            for br in parsed["elseif"]:
-                if not isinstance(br, pp.ParseResults):
-                    continue
-                branch_nodes: list[TinyNode] = []
-                for stmt in br.then:
-                    if isinstance(stmt, pp.ParseResults) and "type" in stmt:
-                        node_cls = TinyNode.from_statement_type(stmt["type"])  # type: ignore[index]
-                        if node_cls is not None:
-                            branch_nodes.append(node_cls.from_parsed(stmt))  # type: ignore[arg-type]
-                built_elseif.append((br.cond, branch_nodes))
+        # Initial if-then condition (defined by the parser for if-statements)
+        branches.append(
+            (parsed.cond, cls.body_statements(parsed.then))
+        )
 
-        # Build ELSE branch
-        built_else: list[TinyNode] = []
+        # Add ELSEIF branches
+        for br in parsed.elseif:
+            branches.append((br.cond, cls.body_statements(br.then)))
+
+        # Add ELSE branch
         if "else" in parsed:
-            for stmt in parsed["else"]:
-                if isinstance(stmt, pp.ParseResults) and "type" in stmt:
-                    node_cls = TinyNode.from_statement_type(stmt["type"])  # type: ignore[index]
-                    if node_cls is not None:
-                        built_else.append(node_cls.from_parsed(stmt))  # type: ignore[arg-type]
+            # if there is an else and we get this far, the condition is always true
+            branches.append((1, cls.body_statements(parsed["else"])))
 
-        return cls(cond=cond_expr, then_statements=built_then, elseif_branches=built_elseif, else_statements=built_else)
+        return cls(branches=branches)
 
     def execute(self, engine: "TinyEngine") -> object | None:  # noqa: F821 - forward ref
-        # Evaluate main condition
-        if self.cond is not None and bool(engine.eval_expr(self.cond)):
-            for node in self.then_statements:
-                node.execute(engine)
-            return None
-
-        # Elseif branches in order
-        for cond, nodes in self.elseif_branches:
+        # Evaluate branches in order
+        for cond, nodes in self.branches:
             if bool(engine.eval_expr(cond)):
                 for node in nodes:
                     node.execute(engine)
-                return None
-
-        # Else branch if present
-        for node in self.else_statements:
-            node.execute(engine)
+                break
         return None
 
 
@@ -349,12 +330,10 @@ class RepeatStmtNode(TinyNode):
     def from_parsed(cls, parsed: pp.ParseResults) -> RepeatStmtNode:
         # Build child statement nodes from the parsed body sequence
         statement_nodes: list[TinyNode] = []
-        for stmt in parsed.body:
-            if isinstance(stmt, pp.ParseResults) and "type" in stmt:
-                node_cls = TinyNode.from_statement_type(stmt["type"])  # type: ignore[index]
-                if node_cls is not None:
-                    statement_nodes.append(node_cls.from_parsed(stmt))  # type: ignore[arg-type]
-        # Condition is mandatory in the parser's definition of repeat-until
+        if parsed.body:
+            stmts = parsed.body
+            statement_nodes.extend(cls.body_statements(stmts))
+
         cond_expr = parsed.cond
         return cls(statements=statement_nodes, cond=cond_expr)
 
@@ -458,13 +437,13 @@ class CallStmtNode(TinyNode):
     statement_type: ClassVar[str] = "call_stmt"
 
     name: str = ""
-    args: List[object] = field(default_factory=list)
+    args: list[object] = field(default_factory=list)
 
     @classmethod
     def from_parsed(cls, parsed: pp.ParseResults) -> CallStmtNode:
         func_group: pp.ParseResults | None = None
         for item in parsed:
-            if isinstance(item, pp.ParseResults) and "type" in item and item["type"] == "func_call":  # type: ignore[index]
+            if "type" in item and item["type"] == "func_call":  # type: ignore[index]
                 func_group = item
                 break
         if func_group is None:
