@@ -11,7 +11,7 @@ from collections.abc import (
     Iterable,
 )
 import pprint
-from typing import Any
+from typing import Any, NamedTuple
 
 from .util import deprecate_argument, _is_iterable, _flatten
 
@@ -21,20 +21,9 @@ _generator_type = type((_ for _ in ()))
 NULL_SLICE: slice = slice(None)
 
 
-class _ParseResultsWithOffset:
-    __slots__ = ["tup"]
-
-    def __init__(self, p1: ParseResults, p2: int) -> None:
-        self.tup: tuple[ParseResults, int] = (p1, p2)
-
-    def __getitem__(self, i):
-        return self.tup[i]
-
-    def __getstate__(self):
-        return self.tup
-
-    def __setstate__(self, state):
-        self.tup = state
+class _ParseResultsWithOffset(NamedTuple):
+    result: Any
+    offset: int
 
 
 class ParseResults:
@@ -94,17 +83,17 @@ class ParseResults:
     _name: str
     _parent: ParseResults
     _all_names: set[str]
-    _modal: bool
     _toklist: list[Any]
-    _tokdict: dict[str, Any]
+    _tokdict: dict[str, list[_ParseResultsWithOffset]]
+    _is_dict_context: bool
 
     __slots__ = (
         "_name",
         "_parent",
         "_all_names",
-        "_modal",
         "_toklist",
         "_tokdict",
+        "_is_dict_context",
     )
 
     class List(list):
@@ -185,6 +174,7 @@ class ParseResults:
         self._name = None
         self._parent = None
         self._all_names = set()
+        self._is_dict_context = False
 
         if toklist is None:
             self._toklist = []
@@ -196,7 +186,7 @@ class ParseResults:
             )
         else:
             self._toklist = [toklist]
-        self._tokdict = dict()
+        self._tokdict = {}
         return self
 
     # Performance tuning: we construct a *lot* of these, so keep this
@@ -213,8 +203,7 @@ class ParseResults:
         asList = deprecate_argument(kwargs, "asList", True, new_name="aslist")
 
         asList = asList and aslist
-        self._tokdict: dict[str, _ParseResultsWithOffset]
-        self._modal = modal
+        self._tokdict: dict[str, list[_ParseResultsWithOffset]]
 
         if name is None or name == "":
             return
@@ -249,26 +238,41 @@ class ParseResults:
             else:
                 self._name = name
 
+    def __eq__(self, other):
+        return (self is other) or (
+            isinstance(other, type(self))
+            and self._name == other._name
+            and self.as_list() == other.as_list()
+            and self.as_dict() == other.as_dict()
+        )
+
     def __getitem__(self, i):
         if isinstance(i, (int, slice)):
             return self._toklist[i]
 
         if i not in self._all_names:
-            return self._tokdict[i][-1][0]
+            return self._tokdict[i][-1].result
 
-        return ParseResults([v[0] for v in self._tokdict[i]])
+        return ParseResults([v.result for v in self._tokdict[i]])
 
     def __setitem__(self, k, v, isinstance=isinstance):
+        no_value = object()
         if isinstance(v, _ParseResultsWithOffset):
-            self._tokdict[k] = self._tokdict.get(k, list()) + [v]
-            sub = v[0]
+            cur_tokdict_value = self._tokdict.get(k, no_value)
+            if cur_tokdict_value is no_value:
+                self._tokdict[k] = [v]
+            else:
+                cur_tokdict_value.append(v)
+            sub = v.result
         elif isinstance(k, (int, slice)):
             self._toklist[k] = v
             sub = v
         else:
-            self._tokdict[k] = self._tokdict.get(k, []) + [
-                _ParseResultsWithOffset(v, 0)
-            ]
+            cur_tokdict_value = self._tokdict.get(k, no_value)
+            if cur_tokdict_value is no_value:
+                self._tokdict[k] = [_ParseResultsWithOffset(v, 0)]
+            else:
+                cur_tokdict_value.append(_ParseResultsWithOffset(v, 0))
             sub = v
         if isinstance(sub, ParseResults):
             sub._parent = self
@@ -294,13 +298,19 @@ class ParseResults:
         # get removed indices
         removed = list(range(*i.indices(mylen)))
         removed.reverse()
-        # fixup indices in token dictionary
-        for occurrences in self._tokdict.values():
+        # fixup indices in token dictionary; copy() shares these lists, so
+        # renumber a private copy rather than the list itself
+        for name, occurrences in self._tokdict.items():
+            occurrences = occurrences[:]
             for j in removed:
-                for k, (value, position) in enumerate(occurrences):
-                    occurrences[k] = _ParseResultsWithOffset(
-                        value, position - (position > j)
-                    )
+                for k, (value, position) in enumerate(reversed(occurrences)):
+                    if position > j:
+                        occurrences[len(occurrences) - 1 - k] = _ParseResultsWithOffset(
+                            value, position - 1
+                        )
+                    else:
+                        break
+            self._tokdict[name] = occurrences
 
     def __contains__(self, k) -> bool:
         return k in self._tokdict
@@ -448,12 +458,14 @@ class ParseResults:
 
         """
         self._toklist.insert(index, ins_string)
-        # fixup indices in token dictionary
-        for occurrences in self._tokdict.values():
+        # fixup indices in token dictionary; copy() shares these lists, so
+        # renumber a private copy rather than the list itself
+        for name, occurrences in self._tokdict.items():
+            occurrences = occurrences[:]
             for k, (value, position) in enumerate(occurrences):
-                occurrences[k] = _ParseResultsWithOffset(
-                    value, position + (position > index)
-                )
+                if position > index:
+                    occurrences[k] = _ParseResultsWithOffset(value, position + 1)
+            self._tokdict[name] = occurrences
 
     def append(self, item):
         """
@@ -525,27 +537,42 @@ class ParseResults:
             return ""
 
     def __add__(self, other: ParseResults) -> ParseResults:
+        if not isinstance(other, ParseResults):
+            return NotImplemented
+        if not other:
+            return self
+
         ret = self.copy()
         ret += other
         return ret
 
     def __iadd__(self, other: ParseResults) -> ParseResults:
+        if not isinstance(other, ParseResults):
+            return NotImplemented
         if not other:
             return self
 
         if other._tokdict:
             offset = len(self._toklist)
-            addoffset = lambda a: offset if a < 0 else a + offset
+            # addoffset = lambda a: offset if a < 0 else a + offset
             otheritems = other._tokdict.items()
             otherdictitems = [
-                (k, _ParseResultsWithOffset(v[0], addoffset(v[1])))
+                # (k, _ParseResultsWithOffset(v[0], addoffset(v[1])))
+                (
+                    k,
+                    _ParseResultsWithOffset(
+                        v.result,
+                        # addoffset(v[1])
+                        (offset if v.offset < 0 else v.offset + offset),
+                    ),
+                )
                 for k, vlist in otheritems
                 for v in vlist
             ]
             for k, v in otherdictitems:
                 self[k] = v
-                if isinstance(v[0], ParseResults):
-                    v[0]._parent = self
+                if isinstance(v.result, ParseResults):
+                    v.result._parent = self
 
         self._toklist += other._toklist
         self._all_names |= other._all_names
@@ -555,9 +582,7 @@ class ParseResults:
         if isinstance(other, int) and other == 0:
             # useful for merging many ParseResults using sum() builtin
             return self.copy()
-        else:
-            # this may raise a TypeError - so be it
-            return other + self
+        return NotImplemented
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self._toklist!r}, {self.as_dict()})"
@@ -659,7 +684,9 @@ class ParseResults:
 
         def to_item(obj):
             if isinstance(obj, ParseResults):
-                return obj.as_dict() if obj.haskeys() else [to_item(v) for v in obj]
+                if obj.haskeys() or obj._is_dict_context:
+                    return obj.as_dict()
+                return [to_item(v) for v in obj]
             else:
                 return obj
 
@@ -674,11 +701,13 @@ class ParseResults:
         """
         ret: ParseResults = object.__new__(ParseResults)
         ret._toklist = self._toklist[:]
+        # the occurrence lists are shared with the original; the only methods
+        # that renumber them (__delitem__, insert) copy before writing, so a
+        # copy can never renumber the original's offsets
         ret._tokdict = {**self._tokdict}
         ret._parent = self._parent
         ret._all_names = {*self._all_names}
         ret._name = self._name
-        ret._modal = self._modal
         return ret
 
     def deepcopy(self) -> ParseResults:
@@ -688,12 +717,16 @@ class ParseResults:
         .. versionadded:: 3.1.0
         """
         ret = self.copy()
+        # map id() of each copied token to its copy, so that results names
+        # referencing items in the token list stay linked to the copies (and
+        # decoupled from the original)
+        memo: dict[int, Any] = {}
         # replace values with copies if they are of known mutable types
         for i, obj in enumerate(self._toklist):
             if isinstance(obj, ParseResults):
                 ret._toklist[i] = obj.deepcopy()
             elif isinstance(obj, (str, bytes)):
-                pass
+                continue
             elif isinstance(obj, MutableMapping):
                 ret._toklist[i] = dest = type(obj)()
                 for k, v in obj.items():
@@ -702,6 +735,20 @@ class ParseResults:
                 ret._toklist[i] = type(obj)(
                     v.deepcopy() if isinstance(v, ParseResults) else v for v in obj  # type: ignore[call-arg]
                 )
+            else:
+                continue
+            memo[id(obj)] = ret._toklist[i]
+
+        # rebuild the results-name dict so that named results point at the
+        # deep-copied tokens, instead of remaining linked to the original
+        ret._tokdict = {
+            name: [
+                _ParseResultsWithOffset(memo.get(id(value), value), offset)
+                for value, offset in occurrences
+            ]
+            for name, occurrences in self._tokdict.items()
+        }
+
         return ret
 
     def get_name(self) -> str | None:
@@ -750,14 +797,12 @@ class ParseResults:
                 ),
                 None,
             )
-        elif (
-            len(self) == 1
-            and len(self._tokdict) == 1
-            and next(iter(self._tokdict.values()))[0][1] in (0, -1)
-        ):
-            return next(iter(self._tokdict.keys()))
-        else:
-            return None
+        elif len(self) == 1 and len(self._tokdict) == 1:
+            first_name, first_pr_offset = next(iter(self._tokdict.items()))
+            if first_pr_offset[0].offset <= 0:
+                return first_name
+
+        return None
 
     def dump(self, indent="", full=True, include_list=True, _depth=0) -> str:
         """
@@ -875,13 +920,20 @@ class ParseResults:
             (
                 self._tokdict.copy(),
                 None,
-                self._all_names,
+                list(self._all_names),
                 self._name,
+                self._is_dict_context,
             ),
         )
 
     def __setstate__(self, state):
-        self._toklist, (self._tokdict, par, inAccumNames, self._name) = state
+        self._toklist, (
+            self._tokdict,
+            _,
+            inAccumNames,
+            self._name,
+            self._is_dict_context,
+        ) = state
         self._all_names = set(inAccumNames)
         self._parent = None
 

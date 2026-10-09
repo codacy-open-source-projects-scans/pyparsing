@@ -27,19 +27,129 @@ Required Python versions by pyparsing version
 
 Version 3.3.3 - in development
 ------------------------------
-- Adding support for Python 3.15.
+- Added support for Python 3.15.
+
+- Parse actions that return a tuple value for a named expression formerly saved
+  just the first value of the tuple. Now they return the entire tuple. Partially
+  fixes Issue #401, PR #640 submitted by Vincent Gao et AI.
+
+- Fixed CI unit test jobs selecting a tox environment with no test commands.
+  The matrix and fallback now select `py-unit`, as diagnosed and proposed by
+  glaziermag in issue #662; submitted by Neal Lin et AI.
+
+- Fixed `Dict` returning an empty nested `ParseResults.as_dict()` as `[]`
+  instead of `{}`. Incorporates partial solution submitted in PR #635
+  submitted by Leo Ji.
+
+  Additional fixes found as part of this work:
+
+  - Removed vestigial unused `ParseResults._modal` attribute.
+
+  - Fixed incidental bug when Dict tries to create a dict with a `ParseResults`
+    value for a key (not hashable).
+
+- Fixed `Word(..., max=n)` raising instead of matching up to `max` characters
+  when the character set contained whitespace - `Word(nums, max=3)` and
+  `Word(nums + " ", max=3)` gave opposite results on
+  the same input. Now both forms match up to `max` and leave the rest for
+  the next parser. PR #646 submitted by Andrew Chen et AI.
+
+- Fixed `QuotedString` stripping whitespace that is part of a multi-character
+  quote delimiter, e.g. the leading newline in `QuotedString("\n;",
+  multiline=True)`. The delimiter was silently collapsed to `";"`, so the
+  newline was ignored when matching. `QuotedString` now only rejects
+  quote_char/end_quote_char values that are empty or entirely whitespace, and
+  preserves any surrounding whitespace that is part of a valid delimiter.
+  Reported in issue #492.
+
+- Fixed `pyparsing_common.as_datetime` raising `Invalid date/time: microsecond
+  must be in 0..999999` for valid ISO-8601 timestamps whose fractional seconds
+  round up to a full second (e.g. `2021-06-15T12:30:59.9999995`, common in
+  nanosecond-precision timestamps). The rounded microseconds are now added via
+  `timedelta` so the value carries into the next second instead of overflowing
+  the `datetime` microsecond argument. PR submitted by Andrew Chen et AI.
+
+- Fixed debug output corruption when a parsed line contains a carriage return or
+  other control character. `set_debug()` printed the source line verbatim, so a
+  stray `\r` returned the terminal cursor to column 0 and overwrote the "Match ...
+  at loc" text. Control characters in the debug line are now shown escaped, and the
+  marker caret stays aligned with the match location. Issue #496, reported by
+  Matthew Rowles.
+
+- Fixed `ParseResults.copy()` sharing its results-name bookkeeping with the original.
+  The copy got its own token list, but the per-name lists of matched occurrences were
+  shared, and `insert()`/`pop()`/`del` renumber those offsets in place - so mutating a
+  copy silently corrupted the original's results names, and `get_name()` on the
+  original could return `None`. PR submitted by Andrew Chen et AI.
+
+- Fixed bugs in `ParseResults.__add__()` and `ParseResults.__radd__()`, where
+  erroneous `AttributeError` or `RecursionError` could be raised when adding
+  `ParseResults` objects to non-`ParseResults` objects, instead of expected
+  `TypeError`. PR submitted by Vincent Gao et AI.
+
+- Fixed `ParseResults.__iadd__` (``+=``) leaking an `AttributeError` about a
+  private attribute when the right-hand operand is not a `ParseResults` (e.g.
+  `results += [1]`). It now returns `NotImplemented` so Python raises a
+  `TypeError`, matching the `__add__` operator. PR submitted by Andrew Chen et AI.
+
+- Fixed `pyparsing_common.as_datetime` parse action incorrectly scaling fractional
+  seconds, writing milliseconds into the `datetime` microsecond field (for example
+  "1997-07-16T19:20:30.45" produced microsecond 449 instead of 450000). Fractional
+  seconds are now scaled to microseconds, matching `convert_to_datetime` and the
+  standard library. PR submitted by Vincent Gao.
 
 - Fixed matching bug in `match_previous_expr()`, when expression is modified with
   `leave_whitespace(recursive=True)`. Issue #633, reported by Ahmed Mohamed Abdelaal,
   PR submitted by fcardosojr18 et AI.
 
+- Fixed `match_previous_expr()` failing to match nested or repeated expressions, so that
+  it can now be used for matching nested open/close tags. A new guard parse action was
+  added on every match of the repeated expression and never removed, so all of them ran
+  on each attempt to match and only one could succeed; a second pair anywhere in the
+  input would fail, and after a failed parse the expression would keep rejecting valid
+  input. The pending matches are now kept on a stack, so an inner match pairs with the
+  nearest enclosing one. Issue #560, PR submitted by Rajesh Kanade et AI.
+
+- Fixed `Located` reporting a `locn_start` that included leading whitespace when the
+  wrapped expression delegates whitespace skipping to sub-expressions (such as
+  `MatchFirst` or `And`). The leading whitespace is now skipped before the start
+  location is recorded, while `leave_whitespace()` expressions keep their whitespace.
+  Issue #621, reported by MeanSquaredError.
+
+- Fixed `ParseResults.deepcopy()` not deep-copying results names that referenced
+  nested `ParseResults`. Only the token list was copied, so a named token still
+  pointed at the original; changing the original (or the copy) was visible through
+  the other when the token was reached by name, and the same token could differ
+  when reached by index versus by name. Results names now reference the
+  deep-copied tokens. PR submitted by Sarath Francis.
+
 - Update type checking to use `mypy 1.20.0`.
+
+- Up to 30% performance boost in `ParseResults.__setitem__`, which benefits all pyparsing
+  parsers. Inspired by work proposed in PR #650, submitted by Justin Zhang.
+
+- Significant performance boost in `ParseResults.__delitem__`.
 
 - 5-8% performance boost optimizing `ParseResults.copy()`. Inspired by similar changes
   made by Evan Hubinger in https://github.com/evhub/cpyparsing.
 
+- Minor performance improvement in builtin quoted string expressions, using `Regex` instead
+  of `And`.
+
 - Added `docs/pyparsing_class.md`, a more comprehensive class diagram capturing the major
   classes and modules in the pyparsing package.
+
+- Updated `examples/http_server_log_parser.py` to use more modern Python and pyparsing
+  features, including PEP8 naming, datetime and timezone parsing and conversion, and
+  associated railroad diagram.
+
+- Fixed `RecursionError` when constructing a bounded repetition with a large upper
+  bound, such as ``expr[..., 1000]`` or ``expr * (0, 1000)``. The optional tail was
+  built as a deeply nested chain of ``Optional`` expressions, which recursed the upper
+  bound number of levels deep during both construction and parsing. It is now built as
+  a flat, bounded ``ZeroOrMore`` loop, so construction and parsing no longer scale with
+  the upper bound -- and the loop still exits early (stopping at the first non-match),
+  preserving the original early-exit behavior. Reported in issue #332.
 
 
 Version 3.3.2 - January, 2026

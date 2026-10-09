@@ -354,15 +354,27 @@ def condition_as_parse_action(
     return pa
 
 
+# control characters escaped so they can't corrupt the printed debug line
+# (for example a stray '\r' would otherwise return the cursor to column 0)
+_debug_control_char_map = {c: repr(chr(c))[1:-1] for c in (*range(0x20), 0x7F)}
+
+
 def _default_start_debug_action(
     instring: str, loc: int, expr: ParserElement, cache_hit: bool = False
 ):
     cache_hit_str = "*" if cache_hit else ""
+    current_col = col(loc, instring)
+    current_line = line(loc, instring)
+    escaped_line = current_line.translate(_debug_control_char_map)
+    # keep the caret under the match location after escaping widens the line
+    caret_col = (
+        len(current_line[: current_col - 1].translate(_debug_control_char_map)) + 1
+    )
     print(
         (
-            f"{cache_hit_str}Match {expr} at loc {loc}({lineno(loc, instring)},{col(loc, instring)})\n"
-            f"  {line(loc, instring)}\n"
-            f"  {'^':>{col(loc, instring)}}"
+            f"{cache_hit_str}Match {expr} at loc {loc}({lineno(loc, instring)},{current_col})\n"
+            f"  {escaped_line}\n"
+            f"  {'^':>{caret_col}}"
         )
     )
 
@@ -975,13 +987,21 @@ class ParserElement(ABC):
                             raise exc from parse_action_exc
 
                         if tokens is not None and tokens is not ret_tokens:
-                            ret_tokens = ParseResults(
-                                tokens,
-                                self.resultsName,
-                                aslist=self.saveAsList
-                                and isinstance(tokens, (ParseResults, list)),
-                                modal=self.modalResults,
-                            )
+                            if isinstance(tokens, (ParseResults, list)) or tokens == ():
+                                ret_tokens = ParseResults(
+                                    tokens,
+                                    self.resultsName,
+                                    aslist=self.saveAsList
+                                    and isinstance(tokens, (ParseResults, list)),
+                                    modal=self.modalResults,
+                                )
+                            else:
+                                ret_tokens = ParseResults(
+                                    [tokens],
+                                    self.resultsName,
+                                    aslist=False,
+                                    modal=self.modalResults,
+                                )
                 except Exception as err:
                     # print "Exception raised in user parse action:", err
                     if self.debugActions.debug_fail:
@@ -998,13 +1018,21 @@ class ParserElement(ABC):
                         raise exc from parse_action_exc
 
                     if tokens is not None and tokens is not ret_tokens:
-                        ret_tokens = ParseResults(
-                            tokens,
-                            self.resultsName,
-                            aslist=self.saveAsList
-                            and isinstance(tokens, (ParseResults, list)),
-                            modal=self.modalResults,
-                        )
+                        if isinstance(tokens, (ParseResults, list)) or tokens == ():
+                            ret_tokens = ParseResults(
+                                tokens,
+                                self.resultsName,
+                                aslist=self.saveAsList
+                                and isinstance(tokens, (ParseResults, list)),
+                                modal=self.modalResults,
+                            )
+                        else:
+                            ret_tokens = ParseResults(
+                                [tokens],
+                                self.resultsName,
+                                aslist=False,
+                                modal=self.modalResults,
+                            )
         if debugging:
             # print("Matched", self, "->", ret_tokens.as_list())
             if self.debugActions.debug_match:
@@ -1743,20 +1771,24 @@ class ParserElement(ABC):
             return And([])
 
         if optElements:
-
-            def makeOptionalList(n):
-                if n > 1:
-                    return Opt(self + makeOptionalList(n - 1))
-                else:
-                    return Opt(self)
+            # Build the optional tail as a bounded ``ZeroOrMore`` instead of a
+            # deeply nested ``Opt(self + Opt(self + ...))`` chain. The nested
+            # form recursed ``optElements`` levels deep, which raised
+            # RecursionError for large upper bounds (e.g. ``expr[..., 1000]``)
+            # -- see issue #332. ``ZeroOrMore(..., max=optElements)`` is a flat
+            # loop that still *exits early* (it stops at the first non-match,
+            # just like the recursive form), so it preserves the original
+            # early-exit behavior while no longer scaling the call stack with
+            # the upper bound.
+            optionalTail = ZeroOrMore(self, max=optElements)
 
             if minElements:
                 if minElements == 1:
-                    ret = self + makeOptionalList(optElements)
+                    ret = self + optionalTail
                 else:
-                    ret = And([self] * minElements) + makeOptionalList(optElements)
+                    ret = And([self] * minElements) + optionalTail
             else:
-                ret = makeOptionalList(optElements)
+                ret = optionalTail
         else:
             if minElements == 1:
                 ret = self
@@ -3353,8 +3385,6 @@ class Word(Token):
         throw_exception = False
         if loc - start < self.minLen:
             throw_exception = True
-        elif self.maxSpecified and loc < instrlen and instring[loc] in body_chars:
-            throw_exception = True
         elif self.asKeyword and (
             (start > 0 and instring[start - 1] in body_chars)
             or (loc < instrlen and instring[loc] in body_chars)
@@ -3703,17 +3733,16 @@ class QuotedString(Token):
         )
         quote_char = quoteChar or quote_char
 
-        # remove white space from quote chars
-        quote_char = quote_char.strip()
-        if not quote_char:
+        # reject empty or whitespace-only quote chars, but preserve any
+        # whitespace that is part of a valid quote delimiter (e.g. a leading
+        # newline in a multiline quote such as "\n;")
+        if not quote_char.strip():
             raise ValueError("quote_char cannot be the empty string")
 
         if end_quote_char is None:
             end_quote_char = quote_char
-        else:
-            end_quote_char = end_quote_char.strip()
-            if not end_quote_char:
-                raise ValueError("end_quote_char cannot be the empty string")
+        elif not end_quote_char.strip():
+            raise ValueError("end_quote_char cannot be the empty string")
 
         self.quote_char: str = quote_char
         self.quote_char_len: int = len(quote_char)
@@ -5583,7 +5612,11 @@ class Located(ParseElementEnhance):
     """
 
     def parseImpl(self, instring, loc, do_actions=True) -> ParseImplReturnType:
-        start = loc
+        # skip leading whitespace before capturing the start location, so
+        # locn_start marks the start of the match and not preceding whitespace,
+        # even when the wrapped expression delegates whitespace skipping to its
+        # sub-expressions (e.g. And/MatchFirst). Issue #621.
+        start = self.expr.preParse(instring, loc)
         loc, tokens = self.expr._parse(instring, start, do_actions, callPreParse=False)
         ret_tokens = ParseResults([start, tokens, loc])
         ret_tokens["locn_start"] = start
@@ -5646,6 +5679,7 @@ class _MultipleMatch(ParseElementEnhance):
         self,
         expr: Union[str, ParserElement],
         stop_on: typing.Optional[Union[ParserElement, str]] = None,
+        max: typing.Optional[int] = None,
         **kwargs,
     ) -> None:
         stopOn: typing.Optional[Union[ParserElement, str]] = deprecate_argument(
@@ -5653,8 +5687,11 @@ class _MultipleMatch(ParseElementEnhance):
         )
 
         super().__init__(expr)
+        if max is not None and max <= 0:
+            raise ValueError("max must be greater than 0")
         stopOn = stopOn or stop_on
         self.saveAsList = True
+        self.max_count = max
         ender = stopOn
         if isinstance(ender, str_type):
             ender = self._literalStringClass(ender)
@@ -5681,9 +5718,10 @@ class _MultipleMatch(ParseElementEnhance):
         if check_ender:
             try_not_ender(instring, loc)
         loc, tokens = self_expr_parse(instring, loc, do_actions)
+        match_count = 1
         try:
             hasIgnoreExprs = not not self.ignoreExprs
-            while 1:
+            while self.max_count is None or match_count < self.max_count:
                 if check_ender:
                     try_not_ender(instring, loc)
                 if hasIgnoreExprs:
@@ -5692,6 +5730,7 @@ class _MultipleMatch(ParseElementEnhance):
                     preloc = loc
                 loc, tmptokens = self_expr_parse(instring, preloc, do_actions)
                 tokens += tmptokens
+                match_count += 1
         except (ParseException, IndexError):
             pass
 
@@ -5786,11 +5825,12 @@ class ZeroOrMore(_MultipleMatch):
         self,
         expr: Union[str, ParserElement],
         stop_on: typing.Optional[Union[ParserElement, str]] = None,
+        max: typing.Optional[int] = None,
         **kwargs,
     ) -> None:
         stopOn: Union[ParserElement, str] = deprecate_argument(kwargs, "stopOn", None)
 
-        super().__init__(expr, stop_on=stopOn or stop_on)
+        super().__init__(expr, stop_on=stopOn or stop_on, max=max)
         self._may_return_empty = True
 
     def parseImpl(self, instring, loc, do_actions=True) -> ParseImplReturnType:
@@ -6610,6 +6650,10 @@ class Dict(TokenConverter):
             if isinstance(ikey, int):
                 ikey = str(ikey).strip()
 
+            # ParseResults are not hashable, cannot be used as a dict key
+            if isinstance(ikey, ParseResults):
+                continue
+
             if len(tok) == 1:
                 tokenlist[ikey] = _ParseResultsWithOffset("", i)
 
@@ -6634,6 +6678,11 @@ class Dict(TokenConverter):
                     tokenlist[ikey] = _ParseResultsWithOffset(dictvalue, i)
                 else:
                     tokenlist[ikey] = _ParseResultsWithOffset(dictvalue[0], i)
+
+        # Mark the tokenlist so that as_dict() knows to serialize an empty
+        # result as {} rather than [], preserving dict semantics even when
+        # there are no matched entries.
+        tokenlist._is_dict_context = True
 
         if self._asPythonDict:
             return [tokenlist.as_dict()] if self.resultsName else tokenlist.as_dict()
@@ -6896,19 +6945,19 @@ def autoname_elements() -> None:
             var.set_name(name)
 
 
-dbl_quoted_string = Combine(
-    Regex(r'"(?:[^"\n\r\\]|(?:"")|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*') + '"'
+dbl_quoted_string = (
+    Regex(r'"(?:[^"\n\r\\]|(?:"")|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*"')
 ).set_name("string enclosed in double quotes")
 
-sgl_quoted_string = Combine(
-    Regex(r"'(?:[^'\n\r\\]|(?:'')|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*") + "'"
+sgl_quoted_string = Regex(
+    r"'(?:[^'\n\r\\]|(?:'')|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*'"
 ).set_name("string enclosed in single quotes")
 
 quoted_string = Combine(
-    (Regex(r'"(?:[^"\n\r\\]|(?:"")|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*') + '"').set_name(
+    Regex(r'"(?:[^"\n\r\\]|(?:"")|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*"').set_name(
         "double quoted string"
     )
-    | (Regex(r"'(?:[^'\n\r\\]|(?:'')|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*") + "'").set_name(
+    | Regex(r"'(?:[^'\n\r\\]|(?:'')|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*'").set_name(
         "single quoted string"
     )
 ).set_name("quoted string using single or double quotes")
@@ -6916,16 +6965,16 @@ quoted_string = Combine(
 # XXX: Is there some way to make this show up in API docs?
 # .. versionadded:: 3.1.0
 python_quoted_string = Combine(
-    (Regex(r'"""(?:[^"\\]|""(?!")|"(?!"")|\\.)*', flags=re.MULTILINE) + '"""').set_name(
+    Regex(r'"""(?:[^"\\]|""(?!")|"(?!"")|\\.)*"""', flags=re.MULTILINE).set_name(
         "multiline double quoted string"
     )
-    ^ (
-        Regex(r"'''(?:[^'\\]|''(?!')|'(?!'')|\\.)*", flags=re.MULTILINE) + "'''"
-    ).set_name("multiline single quoted string")
-    ^ (Regex(r'"(?:[^"\n\r\\]|(?:\\")|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*') + '"').set_name(
+    ^ Regex(r"'''(?:[^'\\]|''(?!')|'(?!'')|\\.)*'''", flags=re.MULTILINE).set_name(
+        "multiline single quoted string"
+    )
+    ^ Regex(r'"(?:[^"\n\r\\]|(?:\\")|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*"').set_name(
         "double quoted string"
     )
-    ^ (Regex(r"'(?:[^'\n\r\\]|(?:\\')|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*") + "'").set_name(
+    ^ Regex(r"'(?:[^'\n\r\\]|(?:\\')|(?:\\(?:[^x]|x[0-9a-fA-F]+)))*'").set_name(
         "single quoted string"
     )
 ).set_name("Python quoted string")
